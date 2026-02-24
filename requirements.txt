@@ -1,0 +1,7 @@
+pandas
+requests
+duckdb
+pyarrow
+fastparquet
+plotly
+pytest
