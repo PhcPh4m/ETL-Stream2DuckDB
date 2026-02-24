@@ -48,6 +48,66 @@ Setup & install
 
 - Data quality checks (run DQ rules and view report)
 
+# Transform normalize raw JSONL to partitioned Parquet
+## Purpose  
+src/transform.py converts newline-delimited OpenWeather JSON records into a flat pandas DataFrame and writes Parquet files partitioned by date. This prepares data for DuckDB queries and downstream DQ checks.
+
+## Input
+
+- data/raw/weather_YYYYMMDD.jsonl (newline-delimited JSON)
+
+## Output
+
+data/processed/date=YYYY-MM-DD/part-YYYY-MM-DD.parquet
+
+## Output schema (main columns)
+
+- city_id, city_name
+
+- weather_main, weather_description
+
+- temp_c, feels_like_c, humidity
+
+- wind_speed_m_s
+
+- dt_api (epoch seconds from API)
+
+- ingest_ts (ISO timestamp added at ingest)
+
+- date (derived YYYY-MM-DD used for partitioning)
+
+## Run locally
+
+``` bash
+python src/transform.py data/raw/weather_20240101.jsonl
+```
+
+# Run in Colab
+
+```python
+from src.transform import normalize_jsonl_to_df, write_parquet_partitioned
+
+df = normalize_jsonl_to_df("data/raw/weather_20240101.jsonl")
+write_parquet_partitioned(df, out_dir="data/processed", partition_col="date", compression="snappy")
+```
+
+## DuckDB quick example
+
+```python
+import duckdb
+con = duckdb.connect(database=':memory:')
+con.execute("CREATE VIEW weather AS SELECT * FROM read_parquet('data/processed/date=*/part-*.parquet')")
+print(con.execute("SELECT date, COUNT(*) FROM weather GROUP BY date ORDER BY date").fetchdf())
+```
+
+## Notes
+
+- ingest_ts is added at ingest; if missing, date is derived from dt (API epoch).
+
+- Parquet uses snappy compression by default. Change via write_parquet_partitioned(..., compression='gzip') if needed.
+
+- Do not commit API keys; use environment variables or getpass in Colab.
+
 # Repo structure
 
 ```
@@ -119,6 +179,8 @@ To scale to production:
 - Colab runtime resets: save dw.duckdb or processed Parquet to Google Drive before closing.
 
 - Missing packages: re-run !pip install -r requirements.txt.
+
+- 401 Invalid API key: confirm your OpenWeather account email and use the correct API key; do not commit keys.
 
 # Contributing
 
