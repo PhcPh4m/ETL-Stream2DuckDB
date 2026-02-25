@@ -34,7 +34,6 @@ This repo is meant for learning and for a portfolio: clear code, runnable notebo
 
 ```
 notebooks/02_batch_etl_api_to_duckdb.ipynb
-
 ```
 ## Run cell in order:
 
