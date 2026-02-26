@@ -74,16 +74,69 @@ def normalize_records(records: List[Dict[str, Any]]) -> pd.DataFrame:
     return df
 
 
+def _serialize_unhashable_cells(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert list/dict cells to JSON strings so drop_duplicates can hash rows."""
+    for col in df.columns:
+        # sample a few non-null values to decide if serialization is needed
+        sample_vals = df[col].dropna().head(20).tolist()
+        if any(isinstance(v, (list, dict)) for v in sample_vals):
+            def _ser(x):
+                if x is None:
+                    return x
+                if isinstance(x, (list, dict)):
+                    try:
+                        return json.dumps(x, sort_keys=True, ensure_ascii=False)
+                    except Exception:
+                        return str(x)
+                return x
+            df[col] = df[col].apply(_ser)
+    return df
+
+
+def _sanitize_date_col(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure date column is a scalar ISO date string for all rows."""
+    if "date" not in df.columns:
+        return df
+
+    def _to_str_date(x):
+        if pd.isna(x):
+            return None
+        # pandas Timestamp or datetime-like
+        try:
+            if hasattr(x, "date"):
+                return x.date().isoformat()
+        except Exception:
+            pass
+        # if dict/list try to extract common keys or serialize
+        if isinstance(x, (dict, list)):
+            if isinstance(x, dict):
+                for k in ("date", "value", "day"):
+                    if k in x:
+                        return str(x[k])
+            try:
+                return json.dumps(x, sort_keys=True, ensure_ascii=False)
+            except Exception:
+                return str(x)
+        return str(x)
+
+    df["date"] = df["date"].apply(_to_str_date).astype("string")
+    return df
+
+
 def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Basic cleaning:
+    - serialize unhashable cells
     - drop exact duplicates
     - parse timestamps (ingest_ts, dt -> obs_ts)
-    - derive date column (YYYY-MM-DD)
+    - derive date column (YYYY-MM-DD) and sanitize it
     - cast common numeric fields
     - fill basic missing values
     """
     if df.empty:
         return df
+
+    # serialize list/dict cells so drop_duplicates won't fail
+    df = _serialize_unhashable_cells(df)
 
     # drop exact duplicates
     df = df.drop_duplicates().reset_index(drop=True)
@@ -106,9 +159,12 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["date"] = datetime.now(timezone.utc).date().isoformat()
 
+    # sanitize date column to ensure consistent string type
+    df = _sanitize_date_col(df)
+
     # common numeric casts (normalized names from OpenWeather)
     numeric_map = {
-        "main_temp": ["main_temp", "main_temp_c", "temp", "main_temp"],  # try common variants
+        "main_temp": ["main_temp", "main_temp_c", "temp", "main_temp"],
         "main_humidity": ["main_humidity", "humidity"],
         "wind_speed": ["wind_speed", "wind_speed_m_s", "wind_speed_ms", "wind_speed"],
         "clouds_all": ["clouds_all", "clouds_all"],
@@ -134,24 +190,54 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-
 def save_partitioned_parquet(df: pd.DataFrame, out_base: Path = PROCESSED_DIR, compression: str = "snappy") -> List[str]:
-    """Write DataFrame partitioned by 'date' into out_base/date=YYYY-MM-DD/part-*.parquet.
-    Returns list of written file paths.
-    """
     written = []
     if df.empty:
         return written
 
+    # ensure date exists and is plain python string
     if "date" not in df.columns:
         df["date"] = datetime.now(timezone.utc).date().isoformat()
+    df["date"] = df["date"].astype(str)
+
+    for date_val, group in df.groupby("date"):
+        part_dir = out_base / f"date={date_val}"
+        part_dir.mkdir(parents=True, exist_ok=True)
+
+        # copy group and drop date column before writing
+        g = group.reset_index(drop=True).copy()
+        if "date" in g.columns:
+            g = g.drop(columns=["date"])
+
+        # convert pandas StringDtype / category -> object to avoid dictionary encoding surprises
+        for col in g.select_dtypes(include=["string", "category"]).columns.tolist():
+            g[col] = g[col].astype(object)
+
+        # create pyarrow table and write
+        table = pa.Table.from_pandas(g, preserve_index=False)
+        out_path = part_dir / f"part-{datetime.now(timezone.utc).strftime('%H%M%S')}.parquet"
+        pq.write_table(table, out_path, compression=compression)
+        written.append(str(out_path))
+
+    return written
+
+    # ensure date exists and is string
+    if "date" not in df.columns:
+        df["date"] = datetime.now(timezone.utc).date().isoformat()
+    df["date"] = df["date"].astype("string")
 
     # write one parquet file per partition (simple, deterministic)
     for date_val, group in df.groupby("date"):
         part_dir = out_base / f"date={date_val}"
         part_dir.mkdir(parents=True, exist_ok=True)
+
+        # copy group and drop date column before writing
+        g = group.reset_index(drop=True).copy()
+        if "date" in g.columns:
+            g = g.drop(columns=["date"])
+
         # create pyarrow table for stable typing
-        table = pa.Table.from_pandas(group.reset_index(drop=True))
+        table = pa.Table.from_pandas(g, preserve_index=False)
         out_path = part_dir / f"part-{datetime.now(timezone.utc).strftime('%H%M%S')}.parquet"
         pq.write_table(table, out_path, compression=compression)
         written.append(str(out_path))
