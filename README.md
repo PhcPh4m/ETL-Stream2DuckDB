@@ -75,6 +75,18 @@ data/processed/date=YYYY-MM-DD/part-YYYY-MM-DD.parquet
 
 - date (derived YYYY-MM-DD used for partitioning)
 
+## Implementation notes
+
+- Flattening uses pd.json_normalize(payload, sep="_").
+
+- Lists/dicts in cells are serialized to JSON strings before deduplication to avoid unhashable-type errors.
+
+- ingest_ts and dt are parsed to timezone-aware timestamps; date is derived and sanitized to YYYY-MM-DD.
+
+- Before writing Parquet, the date column is dropped from the file (partition is represented by folder date=YYYY-MM-DD) and pandas string/category dtypes are converted to plain Python objects to avoid dictionary-encoding drift across files.
+
+- Parquet files are written with Snappy compression by default; one file per partition is produced for deterministic output.
+
 ## Run locally
 
 ``` bash
